@@ -44,13 +44,12 @@ runcmd:
   - sudo apt install -y strongswan inetutils-traceroute net-tools
   - sudo sed -i "/bgpd=no/ s//bgpd=yes/" /etc/frr/daemons
   - sudo service frr restart
-  - touch /etc/strongswan.d/ipsec-vti.sh
-  - chmod +x /etc/strongswan.d/ipsec-vti.sh
   - cp /etc/ipsec.conf /etc/ipsec.conf.bak
   - cp /etc/ipsec.secrets /etc/ipsec.secrets.bak
   - echo "net.ipv4.conf.all.forwarding=1" | sudo tee -a /etc/sysctl.conf
   - echo "net.ipv4.conf.default.forwarding=1" | sudo tee -a /etc/sysctl.conf
   - sudo sysctl -p
+  - sudo apt install hping3
 EOF
 
 # Resource Groups
@@ -95,7 +94,6 @@ az vm create -g $rg -n $spoke1_vnet_name -l $location1 --image Ubuntu2404 --nics
 # spoke1 details
 spoke1_private_ip=$(az network nic show -g $rg -n $spoke1_vnet_name --query ipConfigurations[].privateIPAddress -o tsv | tr -d '\r')  && echo $spoke1_vnet_name private ip: $spoke1_private_ip
 
-
 # spoke2 vnet
 echo -e "\e[1;36mCreating $spoke2_vnet_name VNet...\e[0m"
 az network vnet create -g $rg -n $spoke2_vnet_name -l $location2 --address-prefixes $spoke2_vnet_address --subnet-name $spoke2_vm_subnet_name --subnet-prefixes $spoke2_vm_subnet_address -o none
@@ -110,12 +108,12 @@ spoke2_private_ip=$(az network nic show -g $rg -n $spoke2_vnet_name --query ipCo
 # VNet Peering between hub1 and spoke1
 echo -e "\e[1;36mCreating VNet peerring between $hub1_vnet_name and $spoke1_vnet_name...\e[0m"
 az network vnet peering create -g $rg -n $hub1_vnet_name-to-$spoke1_vnet_name-peering --remote-vnet $spoke1_vnet_name --vnet-name $hub1_vnet_name --allow-forwarded-traffic --allow-vnet-access -o none
-az network vnet peering create -g $rg -n $spoke1_vnet_name-to-$hub1_vnet_name-peering --remote-vnet $hub1_vnet_name --vnet-name $spoke1_vnet_name --allow-vnet-access -o none
+az network vnet peering create -g $rg -n $spoke1_vnet_name-to-$hub1_vnet_name-peering --remote-vnet $hub1_vnet_name --vnet-name $spoke1_vnet_name --allow-forwarded-traffic --allow-vnet-access -o none
 
 # VNet Peering between hub1 and spoke2
 echo -e "\e[1;36mCreating VNet peerring between $hub1_vnet_name and $spoke2_vnet_name...\e[0m"
 az network vnet peering create -g $rg -n $hub1_vnet_name-to-$spoke2_vnet_name-peering --remote-vnet $spoke2_vnet_name --vnet-name $hub1_vnet_name --allow-forwarded-traffic --allow-vnet-access -o none
-az network vnet peering create -g $rg -n $spoke2_vnet_name-to-$hub1_vnet_name-peering --remote-vnet $hub1_vnet_name --vnet-name $spoke2_vnet_name --allow-vnet-access -o none
+az network vnet peering create -g $rg -n $spoke2_vnet_name-to-$hub1_vnet_name-peering --remote-vnet $hub1_vnet_name --vnet-name $spoke2_vnet_name --allow-forwarded-traffic --allow-vnet-access -o none
 
 # spoke1 route table
 echo -e "\e[1;36mDeploying $spoke1_vnet_name route table and attaching it to $spoke1_vm_subnet_name subnet...\e[0m"
@@ -131,13 +129,6 @@ az network route-table route create -g $rg -n to-$onprem1_vnet_name --address-pr
 az network route-table route create -g $rg -n to-$spoke1_vnet_name --address-prefix $spoke1_vnet_address --next-hop-type VirtualAppliance --route-table-name $spoke2_vnet_name --next-hop-ip-address $hub1_gw_private_ip -o none
 az network vnet subnet update -g $rg -n $spoke2_vm_subnet_name --vnet-name $spoke2_vnet_name --route-table $spoke2_vnet_name -o none
 
-# onprem1 route table
-echo -e "\e[1;36mDeploying $onprem1_vnet_name route table and attaching it to $onprem1_gw_subnet_name subnet...\e[0m"
-az network route-table create -g $rg -n $onprem1_vnet_name -l $location1 -o none
-az network route-table route create -g $rg -n to-$spoke1_vnet_name --address-prefix $spoke1_vnet_address --next-hop-type VirtualAppliance --route-table-name $onprem1_vnet_name --next-hop-ip-address $hub1_gw_private_ip -o none
-az network route-table route create -g $rg -n to-$spoke2_vnet_name --address-prefix $spoke2_vnet_address --next-hop-type VirtualAppliance --route-table-name $onprem1_vnet_name --next-hop-ip-address $hub1_gw_private_ip -o none
-az network vnet subnet update -g $rg -n $onprem1_gw_subnet_name --vnet-name $onprem1_vnet_name --route-table $onprem1_vnet_name -o none
-
 #######################
 # onprem1 VPN Config  #
 #######################
@@ -151,15 +142,15 @@ EOF
 ipsec_file=~/ipsec.conf
 cat <<EOF > $ipsec_file
 conn $hub1_vnet_name-gw
-    authby=secret
-    auto=start
-    left=%defaultroute
-    leftid=$onprem1_gw_pubip
-    leftsubnet=$onprem1_vnet_address
-    right=$hub1_gw_pubip
-    rightsubnet=$hub1_vnet_address,$spoke1_vnet_address,$spoke2_vnet_address
-    type=tunnel
-    keyexchange=ikev2
+ authby=secret
+ auto=start
+ left=%defaultroute
+ leftid=$onprem1_gw_pubip
+ leftsubnet=$onprem1_vnet_address
+ right=$hub1_gw_pubip
+ rightsubnet=$hub1_vnet_address,$spoke1_vnet_address,$spoke2_vnet_address
+ type=tunnel
+ keyexchange=ikev2
 EOF
 
 ##### copy files to onprem gw
@@ -186,25 +177,25 @@ EOF
 ipsec_file=~/ipsec.conf
 cat <<EOF > $ipsec_file
 config setup
-    charondebug="all"
+ charondebug="all"
 
 conn $onprem1_vnet_name-gw
-    authby=secret
-    auto=start
-    left=%defaultroute
-    leftid=$hub1_gw_pubip
-    leftsubnet=$hub1_vnet_address,$spoke1_vnet_address,$spoke2_vnet_address
-    right=$onprem1_gw_pubip
-    rightsubnet=$onprem1_vnet_address
-    type=tunnel
-    keyexchange=ikev2
+ authby=secret
+ auto=start
+ left=%defaultroute
+ leftid=$hub1_gw_pubip
+ leftsubnet=$hub1_vnet_address,$spoke1_vnet_address,$spoke2_vnet_address
+ right=$onprem1_gw_pubip
+ rightsubnet=$onprem1_vnet_address
+ type=tunnel
+ keyexchange=ikev2
 EOF
 
 ##### copy files to onprem gw
 echo -e "\e[1;36mCopying and applying S2S VPN Config files to $hub1_vnet_name-gw Gateway VM...\e[0m"
 scp -o StrictHostKeyChecking=no $psk_file $ipsec_file $hub1_gw_pubip:/home/$admin_username
 scp -o StrictHostKeyChecking=no ~/.ssh/* $hub1_gw_pubip:/home/$admin_username/.ssh/
-#ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $hub1_gw_pubip "sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $hub1_gw_pubip "sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
 ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $hub1_gw_pubip "sudo mv /home/$admin_username/ipsec.* /etc/"
 ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $hub1_gw_pubip "sudo systemctl restart ipsec && sudo systemctl enable ipsec"
 ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $hub1_gw_pubip "sudo ipsec statusall"
@@ -214,7 +205,7 @@ ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $onprem1_gw_pubip "sudo ipse
 rm $psk_file $ipsec_file
 
 # check connectivity
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $onprem1_gw_pubip "ping -c 3 $hub1_gw_private_ip && ing -c 3 $spoke1_private_ip && ing -c 3 $spoke2_private_ip"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no $onprem1_gw_pubip "ping -c 3 $hub1_gw_private_ip && ping -c 3 $spoke1_private_ip && ping -c 3 $spoke2_private_ip"
 
 # storage accounts
 echo -e "\e[1;36mCreating storage account wad${location1}${spoke1_vnet_name}1 in $location1...\e[0m"
@@ -243,36 +234,37 @@ s6id=$(az storage account show -g $rg -n wad${location3}${spoke2_vnet_name}3 --q
 
 # storage account blob endpoints
 echo -e "\e[1;36mGetting storage accounts blob endpoints...\e[0m"
-b1=$(az storage account show -g $rg -n wad${location1}${spoke1_vnet_name}1 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b1
-b2=$(az storage account show -g $rg -n wad${location2}${spoke1_vnet_name}2 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b2
-b3=$(az storage account show -g $rg -n wad${location3}${spoke1_vnet_name}3 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b3
-b4=$(az storage account show -g $rg -n wad${location1}${spoke2_vnet_name}1 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b4
-b5=$(az storage account show -g $rg -n wad${location2}${spoke2_vnet_name}2 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b5
-b6=$(az storage account show -g $rg -n wad${location3}${spoke2_vnet_name}3 --query primaryEndpoints.blob -o tsv | tr -d '\r') && echo $b6
+b1=$(az storage account show -g $rg -n wad${location1}${spoke1_vnet_name}1 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b1=${b1#https://} && b1=${b1%/} && echo $b1
+b2=$(az storage account show -g $rg -n wad${location2}${spoke1_vnet_name}2 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b2=${b2#https://} && b2=${b2%/} && echo $b2
+b3=$(az storage account show -g $rg -n wad${location3}${spoke1_vnet_name}3 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b3=${b3#https://} && b3=${b3%/} && echo $b3
+b4=$(az storage account show -g $rg -n wad${location1}${spoke2_vnet_name}1 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b4=${b4#https://} && b4=${b4%/} && echo $b4
+b5=$(az storage account show -g $rg -n wad${location2}${spoke2_vnet_name}2 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b5=${b5#https://} && b5=${b5%/} && echo $b5
+b6=$(az storage account show -g $rg -n wad${location3}${spoke2_vnet_name}3 --query primaryEndpoints.blob -o tsv | tr -d '\r') && b6=${b6#https://} && b6=${b6%/} && echo $b6
 
 ######################################
 # Diagnosis before private endpoints #
 ######################################
+# sudo hping3 -S -p 443 -c 4 -q wadeastus2spoke12.blob.core.windows.net
 # we could also use this command: { time nc -v -z $b1 443; } |& grep real | awk '{print $2}'
 echo -e "\e[1;35mChecking latency from $hub1_vnet_name VM to all stroage accounts before creating private endpoints...\e[0m"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke1_vnet_name}1 storage account in $location1...\e[0m"
-b1lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b1") && echo latency: ${b1lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b1"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke1_vnet_name}2 storage account in $location2...\e[0m"
-b2lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b2") && echo latency: ${b2lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b2"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke1_vnet_name}3 storage account in $location3...\e[0m"
-b3lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b3") && echo latency: ${b3lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b3"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke2_vnet_name}1 storage account in $location1...\e[0m"
-b4lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b4") && echo latency: ${b4lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b4"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke2_vnet_name}2 storage account in $location2...\e[0m"
-b5lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b5") && echo latency: ${b5lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b5"
 
 echo -e "\e[1;36mChecking latency from $onprem1_vnet_name-gw VM in $location1 to wad${location1}${spoke2_vnet_name}3 storage account in $location3...\e[0m"
-b6lb=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b6") && echo latency: ${b5lb}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b6"
 
 
 # private endpoints
@@ -311,28 +303,14 @@ b4ip=$(az network nic show -g $rg -n wad${location1}${spoke2_vnet_name}1-pe-nic 
 b5ip=$(az network nic show -g $rg -n wad${location2}${spoke2_vnet_name}2-pe-nic --query ipConfigurations[].privateIPAddress -o tsv | tr -d '\r') && echo "wad${location2}${spoke2_vnet_name}2-pe private endpoint ip address is: $b5ip"
 b6ip=$(az network nic show -g $rg -n wad${location3}${spoke2_vnet_name}3-pe-nic --query ipConfigurations[].privateIPAddress -o tsv | tr -d '\r') && echo "wad${location3}${spoke2_vnet_name}3-pe private endpoint ip address is: $b6ip"
 
-# Getting only the FQDN of the storage accounts
-b1_cleaned="${b1#https://}"
-b1_cleaned="${b1_cleaned%/}"
-b2_cleaned="${b2#https://}"
-b2_cleaned="${b2_cleaned%/}"
-b3_cleaned="${b3#https://}"
-b3_cleaned="${b3_cleaned%/}"
-b4_cleaned="${b4#https://}"
-b4_cleaned="${b4_cleaned%/}"
-b5_cleaned="${b5#https://}"
-b5_cleaned="${b5_cleaned%/}"
-b6_cleaned="${b6#https://}"
-b6_cleaned="${b6_cleaned%/}"
-
 # Updating hosts file in onprem1 gw
 echo -e "\e[1;36mUpdating hosts file with private endpoint IPs in $onprem1_vnet_name-gw Gateway VM...\e[0m"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b1ip    $b1_cleaned" | sudo tee -a /etc/hosts > /dev/null"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b2ip    $b2_cleaned" | sudo tee -a /etc/hosts > /dev/null"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b3ip    $b3_cleaned" | sudo tee -a /etc/hosts > /dev/null"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b4ip    $b4_cleaned" | sudo tee -a /etc/hosts > /dev/null"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b5ip    $b5_cleaned" | sudo tee -a /etc/hosts > /dev/null"
-ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b6ip    $b6_cleaned" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b1ip $b1" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b2ip $b2" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b3ip $b3" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b4ip $b4" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b5ip $b5" | sudo tee -a /etc/hosts > /dev/null"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$b6ip $b6" | sudo tee -a /etc/hosts > /dev/null"
 
 #####################################
 # Diagnosis after private endpoints #
@@ -340,34 +318,23 @@ ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "echo "$
 echo -e "\e[1;35mChecking latency from $hub1_vnet_name VM to all stroage accounts after creating private endpoints...\e[0m"
 echo -e "\e[1;38mLet's start with private endpoints in $spoke1_vnet_name...\e[0m"
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke1_vnet_name}1 and private endpoint in $location1 while storage account in $location1...\e[0m"
-b1la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b1") && echo latency: ${b1la}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b1"
 
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke1_vnet_name}2 and private endpoint in $location1 while storage account in $location2...\e[0m"
-b2la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b2") && echo latency: ${b2la}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b2"
 
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke1_vnet_name}3 and private endpoint in $location1 while storage account in $location3...\e[0m"
-b3la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b3") && echo latency: ${b3la}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b3"
 
 echo -e "\e[1;38mNow checking private endpoints in $spoke1_vnet_name...\e[0m"
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke2_vnet_name}1 and private endpoint in $location2 while storage account in $location1...\e[0m"
-b4la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b4") && echo latency: ${b4la}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b4"
 
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke2_vnet_name}2 and private endpoint in $location2 while storage account in $location2...\e[0m"
-b5la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b5") && echo latency: ${b5la}s
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b5"
 
 echo -e "\e[1;36mChecking latency from $hub1_vnet_name VM in $location1 to wad${location1}${spoke2_vnet_name}3 and private endpoint in $location2 while storage account in $location3...\e[0m"
-b6la=$(ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "curl -o /dev/null -s -w \"%{time_connect}\\n\" $b6") && echo latency: ${b6la}s
-
-# Results:
-echo -e "\e[1;35mComparing the latency before and after private endpoints...\e[0m"
-printf "\n%-35s %20s %20s\n" "Storage Account" "Latency (Before PE)" "Latency (After PE)"
-printf "%-35s %20s %20s\n" "-------------------------------" "--------------------" "-------------------"
-printf "%-35s %20s %20s\n" "wad${location1}${spoke1_vnet_name}1" "${b1lb}s" "${b1la}s"
-printf "%-35s %20s %20s\n" "wad${location2}${spoke1_vnet_name}2" "${b2lb}s" "${b2la}s"
-printf "%-35s %20s %20s\n" "wad${location3}${spoke1_vnet_name}3" "${b3lb}s" "${b3la}s"
-printf "%-35s %20s %20s\n" "wad${location1}${spoke2_vnet_name}1" "${b4lb}s" "${b4la}s"
-printf "%-35s %20s %20s\n" "wad${location2}${spoke2_vnet_name}2" "${b5lb}s" "${b5la}s"
-printf "%-35s %20s %20s\n" "wad${location3}${spoke2_vnet_name}3" "${b6lb}s" "${b6la}s"
+ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no "$onprem1_gw_pubip" "sudo hping3 -S -p 443 -c 4 -q $b6"
 
 # Cleanup
 # az group delete -g $rg --yes --no-wait -o none
